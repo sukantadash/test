@@ -1,0 +1,9 @@
+# Check time drift
+for pod in $(oc get pods -o name); do
+  echo -n "${pod}: " 
+  oc exec ${pod} -- date +%s
+done
+
+# Install NTP on persistent pods (if possible)
+oc exec <keycloak-pod> -- yum install -y chrony && \
+  oc exec <keycloak-pod> -- systemctl restart chronyd

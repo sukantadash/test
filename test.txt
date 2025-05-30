@@ -1,3 +1,44 @@
+Based on the Keycloak log entry, here's a focused action plan to resolve the "invalid_code" error in your 3scale-RH SSO integration:
+
+Critical Fixes Required:
+Extend Authorization Code Lifespan Immediately
+This is the most urgent fix since the code is expiring before redemption:
+
+bash
+# Edit RH SSO Realm configuration
+oc edit keycloakrealm maas -n <sso-namespace>
+Add/update these values in the spec:
+
+yaml
+spec:
+  realm:
+    accessCodeLifespan: 300  # 5 minutes (up from default 60s)
+    accessCodeLifespanLogin: 300
+    accessCodeLifespanUserAction: 300
+Save and wait 2 minutes for reconciliation.
+
+Verify Client Secret Configuration
+The log shows client_auth_method="client-secretE" (truncated) - let's verify:
+
+bash
+# Check if client secret matches between systems
+# Get Keycloak client secret:
+oc exec <keycloak-pod> -n <sso-namespace> -- \
+  /opt/keycloak/bin/kcadm.sh get clients/<client-id>/client-secret \
+  -r maas --fields value --format csv
+
+# Get 3scale client secret:
+oc get secret system-openid-connect -n <3scale-namespace> \
+  -o jsonpath='{.data.client_secret}' | base64 -d
+If mismatched, update 3scale's secret:
+
+bash
+oc patch secret system-openid-connect -n <3scale-namespace> \
+  -p '{"stringData": {"client_secret": "<NEW_SECRET>"}}'
+Check Time Synchronization
+Run on both 3scale and SSO namespaces:
+
+bash
 # Check time drift
 for pod in $(oc get pods -o name); do
   echo -n "${pod}: " 
@@ -7,3 +48,56 @@ done
 # Install NTP on persistent pods (if possible)
 oc exec <keycloak-pod> -- yum install -y chrony && \
   oc exec <keycloak-pod> -- systemctl restart chronyd
+Additional Verification Steps:
+Inspect Token Exchange Timing
+Check if token requests arrive late:
+
+bash
+# Search Keycloak logs for the specific code_id
+oc logs <keycloak-pod> | grep -A 15 '54acdd37-ff56-47b4-b333-13b9acc4300b'
+Look for timestamps:
+
+log
+[Code created] 05:29:12
+[Token request] 05:29:42   # 30s later → too close to 60s default
+Check Redirect URI Consistency
+Verify exact match:
+
+bash
+# Get Keycloak client config
+oc exec <keycloak-pod> -- \
+  /opt/keycloak/bin/kcadm.sh get clients/<client-id> \
+  -r maas --fields redirectUris
+
+# Get 3scale callback URL
+oc get apimanager <apimanager-name> -o jsonpath='{.spec.apicast.stagingPublicBaseURL}'
+Ensure URIs match exactly (including HTTPS and path).
+
+If Issues Persist:
+Temporary Debug Logging
+Enable detailed tracing:
+
+bash
+# Keycloak debug
+oc set env deployment/<keycloak-deployment> LOG_LEVEL=DEBUG
+
+# 3scale portal debug
+oc set env deployment/<system-provider-deployment> RAILS_LOG_LEVEL=debug
+Network Policy Check
+Verify connectivity between 3scale and SSO:
+
+bash
+# Test from 3scale pod to Keycloak
+oc exec <3scale-system-pod> -c system-developer-portal -- \
+  curl -v -s -o /dev/null -w "%{time_total}s" \
+  https://<keycloak-host>/auth/realms/maas
+Expected Resolution Path:
+The code lifespan extension (300s) should immediately resolve expiration issues
+
+Secret verification eliminates authentication failures
+
+Time synchronization prevents premature expiration
+
+Redirect URI match ensures valid code redemption
+
+After applying these fixes, test authentication again. The specific code_id error should disappear from logs. Monitor for new code IDs to confirm resolution:
